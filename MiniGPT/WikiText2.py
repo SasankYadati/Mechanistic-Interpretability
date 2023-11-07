@@ -1,6 +1,5 @@
 import torch
-from torch.utils.data import DataLoader, Dataset
-from torch.utils.data.sampler import SubsetRandomSampler
+from torch.utils.data import Dataset, random_split
 
 FOLDER_PATH = "wikitext-2-raw/wiki.raw"
 
@@ -37,19 +36,19 @@ class WikiTextDataset(Dataset):
         return x,y
 
     def __len__(self):
-        return len(self.data-self.block_size+1)
-    
+        return len(self.data)-self.block_size
 
 if __name__ == '__main__':
     ds = WikiTextDataset(128)
-    train_size = int(0.9 * len(ds))
+    train_size = int(0.3 * len(ds))
     val_size = len(ds) - train_size
-    indices = list(range(len(ds)))
-    train_indices, val_indices = indices[:train_size], indices[train_size:]
-    train_sampler = SubsetRandomSampler(train_indices)
-    val_sampler = SubsetRandomSampler(val_indices)
-    train_loader = torch.utils.data.DataLoader(ds, batch_size=1, sampler=train_sampler)
-    val_loader = torch.utils.data.DataLoader(ds, batch_size=1, sampler=val_sampler)
+    g = torch.Generator().manual_seed(42)
+    train_ds, val_ds = random_split(ds, (train_size, val_size), g)
+    train_loader = torch.utils.data.DataLoader(train_ds, batch_size=128)
+    val_loader = torch.utils.data.DataLoader(val_ds, batch_size=1)
 
+    print(ds.decode(train_ds[4646*64][0].tolist()))
+    print(len(train_loader))
     for batch_index, (x, y) in enumerate(train_loader):
-        pass
+        # print(batch_index)
+        x_decode = ds.decode_batch(x.tolist())

@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.profiler import profile, ProfilerActivity
+# from torch.profiler import profile, ProfilerActivity
 import einops
 from WikiText2 import WikiTextDataset
 from torch.utils.data import random_split
@@ -9,29 +9,16 @@ from tqdm import tqdm
 
 torch.manual_seed(52)
 
-BATCH_SIZE = 64
-TRAIN_SPLIT = 0.9
-CTX_LENGTH = 128
-
-N_HEADS = 4
-N_EMBD = 128
-N_BLOCKS = 4
-VOCAB_SIZE = 50000
-
-N_EPOCHS = 10
-VAL_ITERS = 100
-LR = 3e-4
-
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 @torch.no_grad()
-def estimate_loss(m, loader):
+def estimate_loss(m, loader, val_iters):
     m.eval()
-    losses = torch.zeros(VAL_ITERS)
+    losses = torch.zeros(val_iters)
     for batch_index, (x, y) in tqdm(enumerate(loader)):
         _, loss = m(x.to(DEVICE), y.to(DEVICE))
         losses[batch_index-1] = loss.item()        
-        if batch_index == VAL_ITERS:
+        if batch_index == val_iters:
             break
     m.train()
     return losses.mean()
@@ -156,13 +143,14 @@ class Block(nn.Module):
         return x
 
 class Transformer(nn.Module):
-    def __init__(self):
+    def __init__(self, cfg):
         super().__init__()
-        self.token_embd_layer = TokenEmbeddingLayer(VOCAB_SIZE, N_EMBD)
-        self.pos_embd_layer = TokenEmbeddingLayer(VOCAB_SIZE, N_EMBD)
-        self.blocks = nn.Sequential(*[Block(N_EMBD, N_HEADS, CTX_LENGTH) for _ in range(N_BLOCKS)])
-        self.layer_norm = nn.LayerNorm(N_EMBD)
-        self.final_layer = nn.Linear(N_EMBD, VOCAB_SIZE)
+        self.cfg = cfg
+        self.token_embd_layer = TokenEmbeddingLayer(cfg["VOCAB_SIZE"], cfg["N_EMBD"])
+        self.pos_embd_layer = TokenEmbeddingLayer(cfg["VOCAB_SIZE"], cfg["N_EMBD"])
+        self.blocks = nn.Sequential(*[Block(cfg["N_EMBD"], cfg["N_HEADS"], cfg["CTX_LENGTH"]) for _ in range(cfg["N_BLOCKS"])])
+        self.layer_norm = nn.LayerNorm(cfg["N_EMBD"])
+        self.final_layer = nn.Linear(cfg["N_EMBD"], cfg["VOCAB_SIZE"])
 
     def forward(self, idx, targets=None):
         # idx - (B, C)
@@ -187,7 +175,7 @@ class Transformer(nn.Module):
         Generate more ids starting from give ids using the model.
         '''
         for _ in range(max_samples):
-            idx_cond = idx[:, -CTX_LENGTH:]
+            idx_cond = idx[:, -self.cfg["CTX_LENGTH"]:]
             logits, _ = self(idx_cond)
             logits = logits[:,-1,:]
             probs = F.softmax(logits, dim=-1)
@@ -196,21 +184,35 @@ class Transformer(nn.Module):
         return idx
 
 if __name__ == '__main__':
-    ds = WikiTextDataset(CTX_LENGTH)
-    VOCAB_SIZE = ds.vocab_size
-    train_size = int(TRAIN_SPLIT * len(ds))
+    cfg = {
+        "BATCH_SIZE" : 64,
+        "TRAIN_SPLIT" : 0.0003, # overfit a tiny subset of the dataset for sanity check
+        "CTX_LENGTH" : 128,
+
+        "N_HEADS" : 4,
+        "N_EMBD" : 64,
+        "N_BLOCKS" : 3,
+        "VOCAB_SIZE" : None,
+
+        "N_EPOCHS" : 100,
+        "VAL_ITERS" : 50,
+        "LR" : 3e-4,
+    }
+    ds = WikiTextDataset(cfg["CTX_LENGTH"])
+    cfg["VOCAB_SIZE"] = ds.vocab_size
+    train_size = int(cfg["TRAIN_SPLIT"] * len(ds))
     val_size = len(ds) - train_size
     indices = list(range(len(ds)))
     train_indices, val_indices = indices[:train_size], indices[train_size:]
 
     g = torch.Generator().manual_seed(42)
     train_ds, val_ds = random_split(ds, (train_size, val_size), g)
-    train_loader = torch.utils.data.DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = torch.utils.data.DataLoader(val_ds, batch_size=BATCH_SIZE)
+    train_loader = torch.utils.data.DataLoader(train_ds, batch_size=cfg["BATCH_SIZE"], shuffle=True)
+    val_loader = torch.utils.data.DataLoader(val_ds, batch_size=cfg["BATCH_SIZE"])
 
-    m = Transformer().to(DEVICE)
-    optimizer = torch.optim.Adam(m.parameters(), LR)
-    for i in range(N_EPOCHS):
+    m = Transformer(cfg).to(DEVICE)
+    optimizer = torch.optim.Adam(m.parameters(), cfg["LR"])
+    for i in range(cfg["N_EPOCHS"]):
         epoch_loss = 0
         for batch_index, (x, y) in tqdm(enumerate(train_loader)):
             logits, loss = m(x.to(DEVICE), y.to(DEVICE))
@@ -218,7 +220,7 @@ if __name__ == '__main__':
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
-        val_loss = estimate_loss(m, val_loader)
-        print(f"Epoch {i} Loss {epoch_loss.item()/batch_index} Val Loss {val_loss}")
-    context = torch.tensor([ds.encode(ds.text[:CTX_LENGTH])], dtype=torch.long, device=DEVICE)
+        val_loss = estimate_loss(m, val_loader, cfg["VAL_ITERS"])
+        print(f"Epoch {i+1}/{cfg['N_EPOCHS']} Loss {epoch_loss.item()/batch_index} Val Loss {val_loss}")
+    context = torch.tensor([ds.encode(ds.text[:cfg["CTX_LENGTH"]])], dtype=torch.long, device=DEVICE)
     print(ds.decode(m.sample(context, max_samples=500)[0].tolist()))
